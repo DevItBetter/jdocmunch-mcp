@@ -202,10 +202,14 @@ class DocIndex:
     file_hashes: dict      # {doc_path: SHA-256} for incremental change detection
     head_sha: str          # HEAD commit SHA when known (GitHub or local Git indexes)
     source_dirty: bool     # True when cached content is not certified clean at head_sha
+    sha_certified: bool    # True when the corpus was built under strict repo@sha rules
     source_root: str       # Absolute source folder for local indexes, if known
 ```
 
-`repo_at_sha` is derived, not stored: it is emitted only when `head_sha` is a 40-hex commit SHA and `source_dirty` is false. Surgical `index_file` updates never clear a dirty, moved-HEAD, or no-longer-Git-backed local index; run `index_local` to recertify the full corpus.
+`DocStore` persists each `DocIndex` as JSON plus cached raw document files.
+`repo_at_sha` is derived, not stored: it is emitted only when `head_sha` is a 40-hex commit SHA, `source_dirty` is false, and `sha_certified` is true. Surgical `index_file` updates never certify a legacy, dirty, moved-HEAD, untracked-path, or no-longer-Git-backed local index; run `index_local` to recertify the full corpus.
+
+For local Git indexes, "clean" means the *indexed corpus* is reproducible at `head_sha`, not that the source folder is pristine. `source_dirty` is set when tracked content within the indexed scope differs from HEAD, when HEAD moves mid-index, or when any indexed path is not tracked by Git — including a gitignored file indexed explicitly via `paths=[...]`, which `git status` cannot see and which is caught by a separate `git ls-files` tracked-ness check. Untracked files that are not part of the index — unsupported extensions, build artifacts, scratch files — do not affect certification. Git state is probed with short-lived `git` subprocesses bounded by `JDOCMUNCH_GIT_TIMEOUT` (seconds, default 10; set to a value `<= 0` to disable the ceiling); a timed-out or otherwise failed probe is treated as dirty so an immutable handle is never emitted for an unknown state.
 
 ---
 
@@ -324,4 +328,5 @@ All errors return:
 | `JDOCMUNCH_OPENAI_COMPAT_BATCH_SIZE` | Batch size for `openai-compatible` embeddings (default: `32`)      | No       |
 | `JDOCMUNCH_ST_MODEL`              | sentence-transformers model name (default: `all-MiniLM-L6-v2`)      | No       |
 | `DOC_INDEX_PATH`                  | Custom storage path (default: `~/.doc-index/`)                       | No       |
+| `JDOCMUNCH_GIT_TIMEOUT`           | Per-call `git` subprocess ceiling in seconds for local repo@sha probing (default: `10`; `<= 0` disables) | No |
 | `JDOCMUNCH_SHARE_SAVINGS`         | Set to `0` to disable anonymous token savings reporting              | No       |
