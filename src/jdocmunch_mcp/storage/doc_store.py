@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import re
 import shutil
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -14,6 +15,8 @@ from ..parser.sections import Section
 from ..embeddings import embed_query, cosine_similarity
 
 INDEX_VERSION = 3
+COMMIT_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+_UNSET = object()
 
 # Module-level LRU cache: {(str(index_path), mtime_ns): DocIndex}
 # Keyed by path + mtime so the entry auto-invalidates whenever the file changes.
@@ -42,6 +45,24 @@ def _file_hash(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
+def normalize_commit_sha(value: Optional[str]) -> Optional[str]:
+    """Return a normalized 40-hex commit SHA, or None for non-commit refs."""
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if not COMMIT_SHA_RE.fullmatch(value):
+        return None
+    return value.lower()
+
+
+def format_repo_at_sha(repo: str, head_sha: Optional[str], source_dirty: bool = False) -> Optional[str]:
+    """Return the immutable repo@sha handle when this index is commit-clean."""
+    sha = normalize_commit_sha(head_sha)
+    if not sha or source_dirty:
+        return None
+    return f"{repo}@{sha}"
+
+
 def _evict_index_cache(index_path: Path) -> None:
     """Remove all cache entries for a given index path (any mtime)."""
     path_str = str(index_path)
@@ -63,6 +84,7 @@ class DocIndex:
     index_version: int = INDEX_VERSION
     file_hashes: dict = field(default_factory=dict)
     head_sha: Optional[str] = None
+    source_dirty: bool = False
     # v1.12.0: BM25 corpus stats. Empty dict for legacy indices — score_section
     # gracefully degrades when stats are missing.
     bm25_stats: dict = field(default_factory=dict)
@@ -82,6 +104,10 @@ class DocIndex:
         self._content_loader = None  # type: ignore[var-annotated]
         # Per-search content cache: section_id -> str. Cleared between searches.
         self._content_cache: dict = {}
+
+    @property
+    def repo_at_sha(self) -> Optional[str]:
+        return format_repo_at_sha(self.repo, self.head_sha, self.source_dirty)
 
     def _ensure_content(self, sec: dict) -> str:
         """Return section content, loading from disk lazily if missing.
@@ -392,6 +418,7 @@ class DocStore:
         doc_types: dict,        # {".md": N}
         file_hashes: Optional[dict] = None,
         head_sha: Optional[str] = None,
+        source_dirty: bool = False,
         source_root: str = "",
     ) -> "DocIndex":
         """Save index and raw files to storage atomically."""
@@ -416,6 +443,7 @@ class DocStore:
             index_version=INDEX_VERSION,
             file_hashes=file_hashes,
             head_sha=head_sha,
+            source_dirty=source_dirty,
             bm25_stats=bm25_stats,
             source_root=source_root or "",
         )
@@ -473,6 +501,7 @@ class DocStore:
             index_version=stored_version,
             file_hashes=data.get("file_hashes", {}),
             head_sha=data.get("head_sha"),
+            source_dirty=bool(data.get("source_dirty", False)),
             bm25_stats=data.get("bm25_stats", {}),
             source_root=data.get("source_root", ""),
         )
@@ -538,7 +567,9 @@ class DocStore:
         new_sections: list,     # list[Section]
         raw_files: dict,        # {doc_path: content} for changed + new files only
         doc_types: dict,
-        head_sha: Optional[str] = None,
+        head_sha=_UNSET,
+        source_dirty=_UNSET,
+        source_root=_UNSET,
     ) -> Optional["DocIndex"]:
         """Incrementally update an existing index.
 
@@ -622,8 +653,10 @@ class DocStore:
             sections=all_section_dicts,
             index_version=INDEX_VERSION,
             file_hashes=file_hashes,
-            head_sha=head_sha,
+            head_sha=index.head_sha if head_sha is _UNSET else head_sha,
+            source_dirty=index.source_dirty if source_dirty is _UNSET else bool(source_dirty),
             bm25_stats=bm25_stats,
+            source_root=index.source_root if source_root is _UNSET else (source_root or ""),
         )
 
         # Save atomically
@@ -690,14 +723,25 @@ class DocStore:
             try:
                 with open(index_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                repos.append({
+                row = {
                     "repo": data["repo"],
                     "indexed_at": data["indexed_at"],
                     "section_count": len(data["sections"]),
                     "doc_count": len(data["doc_paths"]),
                     "doc_types": data["doc_types"],
                     "index_version": data.get("index_version", 1),
-                })
+                }
+                sha = normalize_commit_sha(data.get("head_sha"))
+                source_dirty = bool(data.get("source_dirty", False))
+                if sha:
+                    row["head_sha"] = sha
+                row["source_dirty"] = source_dirty
+                repo_at_sha = format_repo_at_sha(data["repo"], sha, source_dirty)
+                if repo_at_sha:
+                    row["repo_at_sha"] = repo_at_sha
+                if data.get("source_root"):
+                    row["source_root"] = data["source_root"]
+                repos.append(row)
             except Exception:
                 continue
         return repos
@@ -731,13 +775,23 @@ class DocStore:
         }
         if index.head_sha:
             d["head_sha"] = index.head_sha
+        if index.source_dirty:
+            d["source_dirty"] = True
         if index.bm25_stats:
             d["bm25_stats"] = index.bm25_stats
         if getattr(index, "source_root", ""):
             d["source_root"] = index.source_root
         return d
 
-    def _resolve_repo(self, repo: str) -> tuple:
+    def _split_repo_at_sha(self, repo: str) -> tuple[str, Optional[str]]:
+        if not isinstance(repo, str):
+            return str(repo), None
+        base, sep, suffix = repo.rpartition("@")
+        if sep and normalize_commit_sha(suffix):
+            return base, normalize_commit_sha(suffix)
+        return repo, None
+
+    def _resolve_repo_base(self, repo: str) -> tuple:
         """Resolve a 'owner/name' or bare 'name' string.
 
         Returns (owner, name). For bare names without a slash, tries to find
@@ -759,3 +813,19 @@ class DocStore:
 
         # Default to local/name
         return "local", repo
+
+    def _resolve_repo(self, repo: str) -> tuple:
+        """Resolve repo identifiers, including strict repo@40hex aliases."""
+        base_repo, wanted_sha = self._split_repo_at_sha(repo)
+        owner, name = self._resolve_repo_base(base_repo)
+        if not wanted_sha:
+            return owner, name
+
+        index = self.load_index(owner, name)
+        indexed_sha = normalize_commit_sha(index.head_sha if index else None)
+        if index and indexed_sha == wanted_sha and not index.source_dirty:
+            return owner, name
+
+        # Preserve the old tuple-only contract. Callers will load this safe,
+        # non-existent repo and return their normal "Repo not found" shape.
+        return "local", "__repo_at_sha_not_found__"

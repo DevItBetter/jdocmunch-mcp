@@ -67,13 +67,17 @@ def doc_health_radar(
         drift_alarm=drift_alarm,
     )
 
+    result = {
+        "repo": health.get("repo", repo),
+        "section_count": section_count,
+        "doc_count": int(health.get("doc_count") or 0),
+        "radar": radar,
+    }
+    if health.get("repo_at_sha"):
+        result["repo_at_sha"] = health["repo_at_sha"]
+
     return {
-        "result": {
-            "repo": health.get("repo", repo),
-            "section_count": section_count,
-            "doc_count": int(health.get("doc_count") or 0),
-            "radar": radar,
-        },
+        "result": result,
         "_meta": {
             "latency_ms": int((time.perf_counter() - t0) * 1000),
         },

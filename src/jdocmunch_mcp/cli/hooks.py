@@ -163,7 +163,7 @@ def _build_snapshot() -> str:
     lines = ["## jDocMunch Session Snapshot", ""]
     lines.append(f"Indexed doc repos: {len(repos)}")
     for r in repos:
-        name = r.get("name", r.get("repo", "?"))
+        name = r.get("repo_at_sha", r.get("name", r.get("repo", "?")))
         sections = r.get("section_count", r.get("sections", "?"))
         docs = r.get("doc_count", r.get("documents", "?"))
         source = r.get("source_root", r.get("source", ""))

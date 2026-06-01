@@ -11,6 +11,7 @@ import httpx
 from ..parser import parse_file, preprocess_content, ALL_EXTENSIONS
 from ..security import is_secret_file
 from ..storage import DocStore
+from ..storage.doc_store import normalize_commit_sha
 from ..summarizer import summarize_sections
 from ..embeddings import embed_sections, get_provider_name, should_embed
 from ._constants import SKIP_PATTERNS
@@ -39,10 +40,14 @@ def _should_skip(path: str) -> bool:
 
 
 async def fetch_head_commit_sha(
-    owner: str, repo: str, token: Optional[str] = None, client: Optional[httpx.AsyncClient] = None
+    owner: str,
+    repo: str,
+    token: Optional[str] = None,
+    client: Optional[httpx.AsyncClient] = None,
+    ref: str = "HEAD",
 ) -> Optional[str]:
-    """Fetch the HEAD commit SHA cheaply (single lightweight request)."""
-    url = f"https://api.github.com/repos/{owner}/{repo}/commits/HEAD"
+    """Fetch a commit SHA cheaply (single lightweight request)."""
+    url = f"https://api.github.com/repos/{owner}/{repo}/commits/{ref}"
     headers = {"Accept": "application/vnd.github.v3+json"}
     if token:
         headers["Authorization"] = f"token {token}"
@@ -50,19 +55,23 @@ async def fetch_head_commit_sha(
         if client:
             response = await client.get(url, headers=headers)
             response.raise_for_status()
-            return response.json().get("sha")
+            return normalize_commit_sha(response.json().get("sha"))
         async with httpx.AsyncClient(timeout=15.0) as c:
             response = await c.get(url, headers=headers)
             response.raise_for_status()
-            return response.json().get("sha")
+            return normalize_commit_sha(response.json().get("sha"))
     except Exception:
         return None
 
 
 async def fetch_repo_tree(
-    owner: str, repo: str, token: Optional[str] = None, client: Optional[httpx.AsyncClient] = None
+    owner: str,
+    repo: str,
+    token: Optional[str] = None,
+    client: Optional[httpx.AsyncClient] = None,
+    ref: str = "HEAD",
 ) -> list:
-    url = f"https://api.github.com/repos/{owner}/{repo}/git/trees/HEAD"
+    url = f"https://api.github.com/repos/{owner}/{repo}/git/trees/{ref}"
     params = {"recursive": "1"}
     headers = {"Accept": "application/vnd.github.v3+json"}
     if token:
@@ -80,17 +89,19 @@ async def fetch_repo_tree(
 async def fetch_file_content(
     owner: str, repo: str, path: str, token: Optional[str] = None,
     client: Optional[httpx.AsyncClient] = None,
+    ref: str = "HEAD",
 ) -> str:
     url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
+    params = {"ref": ref}
     headers = {"Accept": "application/vnd.github.v3.raw"}
     if token:
         headers["Authorization"] = f"token {token}"
     if client:
-        response = await client.get(url, headers=headers)
+        response = await client.get(url, params=params, headers=headers)
         response.raise_for_status()
         return response.text
     async with httpx.AsyncClient() as c:
-        response = await c.get(url, headers=headers)
+        response = await c.get(url, params=params, headers=headers)
         response.raise_for_status()
         return response.text
 
@@ -98,9 +109,10 @@ async def fetch_file_content(
 async def fetch_gitignore(
     owner: str, repo: str, token: Optional[str] = None,
     client: Optional[httpx.AsyncClient] = None,
+    ref: str = "HEAD",
 ) -> Optional[str]:
     try:
-        return await fetch_file_content(owner, repo, ".gitignore", token, client=client)
+        return await fetch_file_content(owner, repo, ".gitignore", token, client=client, ref=ref)
     except Exception:
         return None
 
@@ -185,24 +197,37 @@ async def index_repo(
             existing = store.load_index(owner, repo)
             if existing and existing.head_sha:
                 current_sha = await fetch_head_commit_sha(owner, repo, github_token)
-                if current_sha and current_sha == existing.head_sha:
+                if current_sha and current_sha == normalize_commit_sha(existing.head_sha):
+                    updated = existing
+                    if existing.source_dirty:
+                        updated = store.incremental_save(
+                            owner=owner, name=repo,
+                            changed_files=[], new_files=[], deleted_files=[],
+                            new_sections=[], raw_files={}, doc_types={},
+                            head_sha=current_sha, source_dirty=False,
+                        ) or existing
                     latency_ms = int((time.perf_counter() - t0) * 1000)
-                    return {
+                    result = {
                         "success": True,
                         "message": "No changes detected (HEAD SHA unchanged)",
                         "repo": f"{owner}/{repo}",
                         "incremental": True,
                         "head_sha": current_sha,
+                        "source_dirty": False,
                         "changed": 0, "new": 0, "deleted": 0,
                         "_meta": {"latency_ms": latency_ms},
                     }
+                    if updated.repo_at_sha:
+                        result["repo_at_sha"] = updated.repo_at_sha
+                    return result
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             # Fetch HEAD SHA alongside tree (reuse connection)
             head_sha = await fetch_head_commit_sha(owner, repo, github_token, client=client)
+            tree_ref = head_sha or "HEAD"
 
             try:
-                tree_entries = await fetch_repo_tree(owner, repo, github_token, client=client)
+                tree_entries = await fetch_repo_tree(owner, repo, github_token, client=client, ref=tree_ref)
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 404:
                     return {"success": False, "error": f"Repository not found: {owner}/{repo}"}
@@ -211,7 +236,7 @@ async def index_repo(
                 raise
 
             gitignore_spec = None
-            gitignore_content = await fetch_gitignore(owner, repo, github_token, client=client)
+            gitignore_content = await fetch_gitignore(owner, repo, github_token, client=client, ref=tree_ref)
             if gitignore_content:
                 import pathspec
                 try:
@@ -228,7 +253,7 @@ async def index_repo(
             async def fetch_with_limit(path: str) -> tuple:
                 async with semaphore:
                     try:
-                        content = await fetch_file_content(owner, repo, path, github_token, client=client)
+                        content = await fetch_file_content(owner, repo, path, github_token, client=client, ref=tree_ref)
                         return path, content
                     except Exception:
                         return path, ""
@@ -254,15 +279,33 @@ async def index_repo(
             changed, new, deleted = store.detect_changes(owner, repo, current_files)
 
             if not changed and not new and not deleted:
+                existing = store.load_index(owner, repo)
+                updated = existing
+                if existing and (
+                    normalize_commit_sha(existing.head_sha) != head_sha
+                    or existing.source_dirty
+                ):
+                    updated = store.incremental_save(
+                        owner=owner, name=repo,
+                        changed_files=[], new_files=[], deleted_files=[],
+                        new_sections=[], raw_files={}, doc_types={},
+                        head_sha=head_sha, source_dirty=False,
+                    ) or existing
                 latency_ms = int((time.perf_counter() - t0) * 1000)
-                return {
+                result = {
                     "success": True,
                     "message": "No changes detected",
                     "repo": f"{owner}/{repo}",
                     "incremental": True,
+                    "source_dirty": False,
                     "changed": 0, "new": 0, "deleted": 0,
                     "_meta": {"latency_ms": latency_ms},
                 }
+                if head_sha:
+                    result["head_sha"] = head_sha
+                if updated and updated.repo_at_sha:
+                    result["repo_at_sha"] = updated.repo_at_sha
+                return result
 
             files_to_parse = set(changed) | set(new)
             new_sections = []
@@ -289,7 +332,7 @@ async def index_repo(
                 owner=owner, name=repo,
                 changed_files=changed, new_files=new, deleted_files=deleted,
                 new_sections=new_sections, raw_files=raw_subset, doc_types=doc_types,
-                head_sha=head_sha,
+                head_sha=head_sha, source_dirty=False,
             )
 
             latency_ms = int((time.perf_counter() - t0) * 1000)
@@ -301,10 +344,15 @@ async def index_repo(
                 "section_count": len(updated.sections) if updated else 0,
                 "indexed_at": updated.indexed_at if updated else "",
                 "semantic_search": use_embeddings and get_provider_name() is not None,
+                "source_dirty": False,
                 "_meta": {"latency_ms": latency_ms},
             }
             if warnings:
                 result["warnings"] = warnings
+            if updated.head_sha:
+                result["head_sha"] = updated.head_sha
+            if updated.repo_at_sha:
+                result["repo_at_sha"] = updated.repo_at_sha
             return result
 
         # --- Full index path ---
@@ -351,8 +399,13 @@ async def index_repo(
             "doc_types": doc_types,
             "files": parsed_files[:20],
             "semantic_search": use_embeddings and get_provider_name() is not None,
+            "source_dirty": False,
             "_meta": {"latency_ms": latency_ms},
         }
+        if saved.head_sha:
+            result["head_sha"] = saved.head_sha
+        if saved.repo_at_sha:
+            result["repo_at_sha"] = saved.repo_at_sha
 
         if warnings:
             result["warnings"] = warnings

@@ -99,7 +99,7 @@ def get_doc_health(
     has_emb = index._has_embeddings()
     embedding_count = sum(1 for s in index.sections if s.get("embedding"))
 
-    return {
+    payload = {
         "repo": f"{owner}/{name}",
         "section_count": len(index.sections),
         "doc_count": len(index.doc_paths),
@@ -115,3 +115,9 @@ def get_doc_health(
             "indexed_at": index.indexed_at,
         },
     }
+    if index.head_sha:
+        payload["head_sha"] = index.head_sha
+    payload["source_dirty"] = bool(index.source_dirty)
+    if index.repo_at_sha:
+        payload["repo_at_sha"] = index.repo_at_sha
+    return payload

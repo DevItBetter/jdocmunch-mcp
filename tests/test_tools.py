@@ -1,11 +1,14 @@
 """Tests for tool functions."""
 
+import subprocess
+
 import pytest
 from pathlib import Path
 
 from jdocmunch_mcp.tools.index_local import _should_skip
 
 from jdocmunch_mcp.tools.index_local import index_local
+from jdocmunch_mcp.tools.index_file import index_file
 from jdocmunch_mcp.tools.list_repos import list_repos
 from jdocmunch_mcp.tools.delete_index import delete_index
 from jdocmunch_mcp.tools.get_toc import get_toc
@@ -15,8 +18,20 @@ from jdocmunch_mcp.tools.search_sections import search_sections
 from jdocmunch_mcp.tools.get_section import get_section
 from jdocmunch_mcp.tools.get_sections import get_sections
 from jdocmunch_mcp.tools.get_section_context import get_section_context
+import jdocmunch_mcp.tools._git as git_helpers
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def _git(cwd: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", *args],
+        cwd=str(cwd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=True,
+    ).stdout.strip()
 
 
 @pytest.fixture
@@ -84,6 +99,168 @@ class TestIndexLocal:
         )
         assert result["success"] is True
         assert ".txt" in result["doc_types"]
+
+    def test_clean_git_repo_emits_repo_at_sha_and_alias_works(self, tmp_path):
+        repo_dir = tmp_path / "repo"
+        store_dir = tmp_path / "store"
+        repo_dir.mkdir()
+        (repo_dir / "README.md").write_text("# Committed\n\nBody", encoding="utf-8")
+        _git(repo_dir, "init")
+        _git(repo_dir, "add", "README.md")
+        _git(repo_dir, "-c", "user.name=Test", "-c", "user.email=t@example.com", "commit", "-m", "docs")
+        sha = _git(repo_dir, "rev-parse", "HEAD")
+
+        result = index_local(
+            path=str(repo_dir),
+            name="gitdocs",
+            use_ai_summaries=False,
+            use_embeddings=False,
+            storage_path=str(store_dir),
+        )
+
+        assert result["success"] is True
+        assert result["head_sha"] == sha
+        assert result["source_dirty"] is False
+        assert result["repo_at_sha"] == f"local/gitdocs@{sha}"
+
+        repos = list_repos(storage_path=str(store_dir))
+        row = next(r for r in repos["repos"] if r["repo"] == "local/gitdocs")
+        assert row["repo_at_sha"] == result["repo_at_sha"]
+        assert row["source_dirty"] is False
+
+        search = search_sections(
+            repo=result["repo_at_sha"],
+            query="Committed",
+            storage_path=str(store_dir),
+        )
+        assert "error" not in search
+        assert search["repo_at_sha"] == result["repo_at_sha"]
+
+    def test_dirty_git_repo_does_not_emit_repo_at_sha(self, tmp_path):
+        repo_dir = tmp_path / "repo"
+        store_dir = tmp_path / "store"
+        repo_dir.mkdir()
+        readme = repo_dir / "README.md"
+        readme.write_text("# Clean\n\nBody", encoding="utf-8")
+        _git(repo_dir, "init")
+        _git(repo_dir, "add", "README.md")
+        _git(repo_dir, "-c", "user.name=Test", "-c", "user.email=t@example.com", "commit", "-m", "docs")
+        sha = _git(repo_dir, "rev-parse", "HEAD")
+        readme.write_text("# Dirty\n\nChanged", encoding="utf-8")
+
+        result = index_local(
+            path=str(repo_dir),
+            name="gitdocs",
+            use_ai_summaries=False,
+            use_embeddings=False,
+            storage_path=str(store_dir),
+        )
+
+        assert result["success"] is True
+        assert result["head_sha"] == sha
+        assert result["source_dirty"] is True
+        assert "repo_at_sha" not in result
+
+    def test_dirty_files_outside_indexed_subdir_do_not_block_repo_at_sha(self, tmp_path):
+        repo_dir = tmp_path / "repo"
+        docs_dir = repo_dir / "docs"
+        src_dir = repo_dir / "src"
+        store_dir = tmp_path / "store"
+        docs_dir.mkdir(parents=True)
+        src_dir.mkdir()
+        (docs_dir / "README.md").write_text("# Docs\n\nCommitted", encoding="utf-8")
+        app = src_dir / "app.py"
+        app.write_text("print('clean')\n", encoding="utf-8")
+        _git(repo_dir, "init")
+        _git(repo_dir, "add", ".")
+        _git(repo_dir, "-c", "user.name=Test", "-c", "user.email=t@example.com", "commit", "-m", "initial")
+        sha = _git(repo_dir, "rev-parse", "HEAD")
+        app.write_text("print('dirty')\n", encoding="utf-8")
+
+        result = index_local(
+            path=str(docs_dir),
+            use_ai_summaries=False,
+            use_embeddings=False,
+            storage_path=str(store_dir),
+        )
+
+        assert result["success"] is True
+        assert result["head_sha"] == sha
+        assert result["source_dirty"] is False
+        assert result["repo_at_sha"] == f"local/docs@{sha}"
+
+    def test_git_status_failure_does_not_emit_repo_at_sha(self, tmp_path, monkeypatch):
+        repo_dir = tmp_path / "repo"
+        store_dir = tmp_path / "store"
+        repo_dir.mkdir()
+        (repo_dir / "README.md").write_text("# Clean\n\nBody", encoding="utf-8")
+        _git(repo_dir, "init")
+        _git(repo_dir, "add", "README.md")
+        _git(repo_dir, "-c", "user.name=Test", "-c", "user.email=t@example.com", "commit", "-m", "docs")
+        sha = _git(repo_dir, "rev-parse", "HEAD")
+
+        real_run = subprocess.run
+
+        def flaky_run(args, *pargs, **kwargs):
+            if list(args[:2]) == ["git", "status"]:
+                raise subprocess.TimeoutExpired(args, 2)
+            return real_run(args, *pargs, **kwargs)
+
+        monkeypatch.setattr(git_helpers.subprocess, "run", flaky_run)
+
+        result = index_local(
+            path=str(repo_dir),
+            use_ai_summaries=False,
+            use_embeddings=False,
+            storage_path=str(store_dir),
+        )
+
+        assert result["success"] is True
+        assert result["head_sha"] == sha
+        assert result["source_dirty"] is True
+        assert "repo_at_sha" not in result
+
+    def test_sha_movement_during_local_index_is_dirty(self):
+        head_sha, dirty = git_helpers.stable_local_git_state(
+            ("a" * 40, False),
+            ("b" * 40, False),
+        )
+        assert head_sha == "b" * 40
+        assert dirty is True
+
+    def test_index_file_marks_clean_repo_dirty_after_edit(self, tmp_path):
+        repo_dir = tmp_path / "repo"
+        store_dir = tmp_path / "store"
+        repo_dir.mkdir()
+        readme = repo_dir / "README.md"
+        readme.write_text("# Clean\n\nBody", encoding="utf-8")
+        _git(repo_dir, "init")
+        _git(repo_dir, "add", "README.md")
+        _git(repo_dir, "-c", "user.name=Test", "-c", "user.email=t@example.com", "commit", "-m", "docs")
+
+        indexed = index_local(
+            path=str(repo_dir),
+            use_ai_summaries=False,
+            use_embeddings=False,
+            storage_path=str(store_dir),
+        )
+        assert "repo_at_sha" in indexed
+
+        readme.write_text("# Dirty\n\nChanged", encoding="utf-8")
+        updated = index_file(
+            file_path=str(readme),
+            use_ai_summaries=False,
+            storage_path=str(store_dir),
+        )
+
+        assert updated["success"] is True
+        assert updated["source_dirty"] is True
+        assert "repo_at_sha" not in updated
+
+        repos = list_repos(storage_path=str(store_dir))
+        row = next(r for r in repos["repos"] if r["repo"] == "local/repo")
+        assert row["source_dirty"] is True
+        assert "repo_at_sha" not in row
 
 
 class TestListRepos:

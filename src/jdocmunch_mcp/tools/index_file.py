@@ -9,19 +9,20 @@ from ..parser import parse_file, preprocess_content, ALL_EXTENSIONS
 from ..storage import DocStore
 from ..summarizer import summarize_sections
 from ..embeddings import embed_sections
+from ._git import local_git_state
 
 
 def _find_owning_index(
     file_path: Path,
     store: DocStore,
-) -> Optional[tuple[str, str, str]]:
+) -> Optional[tuple[str, str, str, Path]]:
     """Find which index owns a given file path.
 
     Walks up the directory tree from the file, checking each ancestor
     folder name against existing local indexes.  When a match is found,
     verifies that the relative path exists in the index's doc_paths.
 
-    Returns (owner, name, rel_path) or None.
+    Returns (owner, name, rel_path, source_root) or None.
     """
     file_path = file_path.resolve()
     parts = file_path.parts
@@ -51,12 +52,12 @@ def _find_owning_index(
             continue
 
         if rel_path in index.doc_paths or rel_path in index.file_hashes:
-            return ("local", folder_name, rel_path)
+            return ("local", folder_name, rel_path, candidate_root)
 
         # The file might be new (not yet in doc_paths) but under this root
         # Accept if the root contains other indexed files
         if index.doc_paths:
-            return ("local", folder_name, rel_path)
+            return ("local", folder_name, rel_path, candidate_root)
 
     return None
 
@@ -91,7 +92,7 @@ def index_file(
     if match is None:
         return {"success": False, "error": f"File not in any index: {file_path}", "exit_code": 1}
 
-    owner, name, rel_path = match
+    owner, name, rel_path, detected_root = match
     repo_id = f"{owner}/{name}"
 
     # Read and parse the file
@@ -114,6 +115,12 @@ def index_file(
     # Determine if this is a new or changed file
     index = store.load_index(owner, name)
     is_new = rel_path not in (index.file_hashes if index else {})
+    source_root = detected_root
+    if index is not None and getattr(index, "source_root", ""):
+        candidate = Path(index.source_root).expanduser()
+        if candidate.exists():
+            source_root = candidate.resolve()
+    head_sha, source_dirty = local_git_state(source_root, scope_path=path)
 
     # Preserve embedding parity: if the existing index has embeddings, embed new sections too.
     if index is not None and index._has_embeddings():
@@ -129,10 +136,13 @@ def index_file(
         new_sections=new_sections,
         raw_files={rel_path: content},
         doc_types={ext: 1},
+        head_sha=head_sha,
+        source_dirty=source_dirty,
+        source_root=str(source_root),
     )
 
     latency_ms = int((time.perf_counter() - t0) * 1000)
-    return {
+    result = {
         "success": True,
         "repo": repo_id,
         "file": rel_path,
@@ -142,6 +152,13 @@ def index_file(
         "exit_code": 0,
         "_meta": {"latency_ms": latency_ms},
     }
+    if updated and updated.head_sha:
+        result["head_sha"] = updated.head_sha
+    if updated:
+        result["source_dirty"] = bool(updated.source_dirty)
+    if updated and updated.repo_at_sha:
+        result["repo_at_sha"] = updated.repo_at_sha
+    return result
 
 
 def index_file_cli(file_path: str) -> dict:

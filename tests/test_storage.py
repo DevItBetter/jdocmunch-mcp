@@ -144,6 +144,36 @@ class TestDocStore:
         assert "foo-bar/baz" in repo_ids
         assert "foo/bar-baz" in repo_ids
 
+    def test_commit_metadata_exposes_repo_at_sha(self, tmp_path):
+        store = make_store(tmp_path)
+        sections, raw_files, doc_types = make_sections_and_files()
+        sha = "a" * 40
+        store.save_index("test", "repo", sections, raw_files, doc_types, head_sha=sha)
+
+        loaded = store.load_index("test", "repo")
+        assert loaded.head_sha == sha
+        assert loaded.repo_at_sha == f"test/repo@{sha}"
+
+        repos = store.list_repos()
+        assert repos[0]["head_sha"] == sha
+        assert repos[0]["repo_at_sha"] == f"test/repo@{sha}"
+        assert repos[0]["source_dirty"] is False
+
+    def test_repo_at_sha_resolves_only_matching_clean_index(self, tmp_path):
+        store = make_store(tmp_path)
+        sections, raw_files, doc_types = make_sections_and_files()
+        sha = "a" * 40
+        store.save_index("test", "repo", sections, raw_files, doc_types, head_sha=sha)
+
+        assert store._resolve_repo(f"test/repo@{sha.upper()}") == ("test", "repo")
+        assert store.load_index(*store._resolve_repo(f"test/repo@{'b' * 40}")) is None
+
+        store.save_index(
+            "test", "dirty", sections, raw_files, doc_types,
+            head_sha=sha, source_dirty=True,
+        )
+        assert store.load_index(*store._resolve_repo(f"test/dirty@{sha}")) is None
+
 
 class TestDocIndexSearch:
     def setup_method(self):

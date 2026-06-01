@@ -340,6 +340,9 @@ def search_sections(
         meta["semantic_weight"] = semantic_weight
     meta["lexical_engine"] = lexical_engine
     meta["freshness"] = freshness_summary
+    if index.head_sha:
+        meta["head_sha"] = index.head_sha
+    meta["source_dirty"] = bool(index.source_dirty)
     if role:
         meta["role_filter"] = role.strip().lower()
     if profile_norm:
@@ -464,10 +467,13 @@ def search_sections(
     if not has_emb and mode == "lexical":
         meta["tip"] = "Re-index with use_embeddings=True for semantic search (better recall on paraphrased queries)"
 
-    return {
+    payload = {
         "repo": f"{owner}/{name}",
         "query": query,
         "results": results,
         "result_count": len(results),
         "_meta": meta,
     }
+    if index.repo_at_sha:
+        payload["repo_at_sha"] = index.repo_at_sha
+    return payload
