@@ -65,7 +65,7 @@ Deletes both the index JSON and the raw content cache directory.
 
 #### `list_repos` — List indexed documentation sets
 
-No input required. Returns all indexed repositories with section counts, document counts, and document type breakdown.
+No input required. Returns all indexed repositories with section counts, document counts, document type breakdown, and commit metadata when available. Clean Git-backed indexes include `repo_at_sha`, an immutable handle in the form `owner/repo@40hexsha`.
 
 #### `get_toc` — Flat table of contents
 
@@ -113,7 +113,7 @@ Returns the heading hierarchy for a single file without content. Lighter than `g
 }
 ```
 
-Weighted scoring across title, summary, tags, and content. Returns summaries only — use `get_section` for full content. `doc_path` is optional; omit to search all documents.
+Weighted scoring across title, summary, tags, and content. Returns summaries only — use `get_section` for full content. `doc_path` is optional; omit to search all documents. `repo` accepts the normal `owner/repo` identifier or a strict `owner/repo@40hexsha` handle; the latter resolves only when the stored index is clean and matches that exact commit.
 
 ---
 
@@ -198,10 +198,14 @@ class DocIndex:
     doc_paths: list        # Sorted list of indexed document paths
     doc_types: dict        # {".md": 12, ".txt": 3}
     sections: list         # Serialized Section dicts (metadata only — no content field)
-    index_version: int     # Schema version (current: 2); mismatch triggers full re-index
+    index_version: int     # Schema version (current: 3); mismatch triggers full re-index
     file_hashes: dict      # {doc_path: SHA-256} for incremental change detection
-    head_sha: str          # HEAD commit SHA (GitHub repos); enables O(1) no-change detection
+    head_sha: str          # HEAD commit SHA when known (GitHub or local Git indexes)
+    source_dirty: bool     # True when cached content is not certified clean at head_sha
+    source_root: str       # Absolute source folder for local indexes, if known
 ```
+
+`repo_at_sha` is derived, not stored: it is emitted only when `head_sha` is a 40-hex commit SHA and `source_dirty` is false. Surgical `index_file` updates never clear a dirty, moved-HEAD, or no-longer-Git-backed local index; run `index_local` to recertify the full corpus.
 
 ---
 
