@@ -174,6 +174,18 @@ class TestDocStore:
         )
         assert store.load_index(*store._resolve_repo(f"test/dirty@{sha}")) is None
 
+    def test_repo_at_sha_miss_cannot_collide_with_real_index(self, tmp_path):
+        store = make_store(tmp_path)
+        sections, raw_files, doc_types = make_sections_and_files()
+        store.save_index("local", "__repo_at_sha_not_found__", sections, raw_files, doc_types)
+
+        owner, name = store._resolve_repo(f"local/missing@{'a' * 40}")
+        assert store.load_index(owner, name) is None
+
+        real = store.load_index(*store._resolve_repo("local/__repo_at_sha_not_found__"))
+        assert real is not None
+        assert real.repo == "local/__repo_at_sha_not_found__"
+
 
 class TestDocIndexSearch:
     def setup_method(self):

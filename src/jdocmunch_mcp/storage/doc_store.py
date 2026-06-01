@@ -472,7 +472,10 @@ class DocStore:
 
     def load_index(self, owner: str, name: str) -> Optional[DocIndex]:
         """Load index from storage, using an in-memory cache keyed by (path, mtime)."""
-        index_path = self._index_path(owner, name)
+        try:
+            index_path = self._index_path(owner, name)
+        except ValueError:
+            return None
         if not index_path.exists():
             return None
 
@@ -748,8 +751,11 @@ class DocStore:
 
     def delete_index(self, owner: str, name: str) -> bool:
         """Delete an index and its raw content cache."""
-        index_path = self._index_path(owner, name)
-        content_dir = self._content_dir(owner, name)
+        try:
+            index_path = self._index_path(owner, name)
+            content_dir = self._content_dir(owner, name)
+        except ValueError:
+            return False
 
         deleted = False
         if index_path.exists():
@@ -826,6 +832,6 @@ class DocStore:
         if index and indexed_sha == wanted_sha and not index.source_dirty:
             return owner, name
 
-        # Preserve the old tuple-only contract. Callers will load this safe,
-        # non-existent repo and return their normal "Repo not found" shape.
-        return "local", "__repo_at_sha_not_found__"
+        # Preserve the old tuple-only contract. The invalid name is intentionally
+        # uncreatable as an index, so a miss cannot collide with a real repo.
+        return "local", "__repo_at_sha_not_found__:sha_mismatch"
