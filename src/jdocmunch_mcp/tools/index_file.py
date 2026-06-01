@@ -10,7 +10,7 @@ from ..storage import DocStore
 from ..storage.doc_store import normalize_commit_sha
 from ..summarizer import summarize_sections
 from ..embeddings import embed_sections
-from ._git import local_git_state
+from ._git import local_git_head, local_git_paths_dirty, local_git_paths_tracked
 
 
 def _find_owning_index(
@@ -122,17 +122,30 @@ def index_file(
         if candidate.exists():
             source_root = candidate.resolve()
     previous_sha = normalize_commit_sha(index.head_sha if index else None)
-    current_sha, worktree_dirty = local_git_state(source_root, scope_path=source_root)
+    previous_certified = bool(index is not None and index.sha_certified)
+    indexed_paths = set(index.doc_paths if index else [])
+    indexed_paths.add(rel_path)
+    paths_tracked = local_git_paths_tracked(source_root, indexed_paths)
+    paths_dirty = local_git_paths_dirty(source_root, indexed_paths)
+    current_sha = local_git_head(source_root)
     head_moved = bool(previous_sha and current_sha and previous_sha != current_sha)
     legacy_uncertified = bool(current_sha and not previous_sha)
     lost_git_context = bool(previous_sha and current_sha is None)
     head_sha = current_sha or previous_sha
     source_dirty = bool(
-        worktree_dirty
+        paths_dirty
         or head_moved
         or legacy_uncertified
         or lost_git_context
+        or (bool(head_sha) and not paths_tracked)
         or (index is not None and index.source_dirty)
+    )
+    sha_certified = bool(
+        previous_certified
+        and current_sha
+        and previous_sha == current_sha
+        and not source_dirty
+        and paths_tracked
     )
 
     # Preserve embedding parity: if the existing index has embeddings, embed new sections too.
@@ -151,6 +164,7 @@ def index_file(
         doc_types={ext: 1},
         head_sha=head_sha,
         source_dirty=source_dirty,
+        sha_certified=sha_certified,
         source_root=str(source_root),
     )
 
@@ -169,6 +183,7 @@ def index_file(
         result["head_sha"] = updated.head_sha
     if updated:
         result["source_dirty"] = bool(updated.source_dirty)
+        result["sha_certified"] = bool(updated.sha_certified)
     if updated and updated.repo_at_sha:
         result["repo_at_sha"] = updated.repo_at_sha
     return result
