@@ -1,6 +1,8 @@
 """Tests for tool functions."""
 
+import os
 import shutil
+import stat
 import subprocess
 
 import pytest
@@ -33,6 +35,15 @@ def _git(cwd: Path, *args: str) -> str:
         text=True,
         check=True,
     ).stdout.strip()
+
+
+def _rmtree_force(path: Path) -> None:
+    """Remove trees containing read-only files, as Git can create on Windows."""
+    def onerror(func, file_path, _exc_info):
+        os.chmod(file_path, stat.S_IWRITE)
+        func(file_path)
+
+    shutil.rmtree(path, onerror=onerror)
 
 
 @pytest.fixture
@@ -570,7 +581,7 @@ class TestIndexLocal:
         )
         assert "repo_at_sha" in indexed
 
-        shutil.rmtree(repo_dir / ".git")
+        _rmtree_force(repo_dir / ".git")
         readme.write_text("# Changed\n\nOutside Git", encoding="utf-8")
         updated = index_file(
             file_path=str(readme),
