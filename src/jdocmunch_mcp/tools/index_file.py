@@ -7,6 +7,7 @@ from typing import Optional
 
 from ..parser import parse_file, preprocess_content, ALL_EXTENSIONS
 from ..storage import DocStore
+from ..storage.doc_store import normalize_commit_sha
 from ..summarizer import summarize_sections
 from ..embeddings import embed_sections
 from ._git import local_git_state
@@ -120,7 +121,19 @@ def index_file(
         candidate = Path(index.source_root).expanduser()
         if candidate.exists():
             source_root = candidate.resolve()
-    head_sha, source_dirty = local_git_state(source_root, scope_path=path)
+    previous_sha = normalize_commit_sha(index.head_sha if index else None)
+    current_sha, worktree_dirty = local_git_state(source_root, scope_path=source_root)
+    head_moved = bool(previous_sha and current_sha and previous_sha != current_sha)
+    legacy_uncertified = bool(current_sha and not previous_sha)
+    lost_git_context = bool(previous_sha and current_sha is None)
+    head_sha = current_sha or previous_sha
+    source_dirty = bool(
+        worktree_dirty
+        or head_moved
+        or legacy_uncertified
+        or lost_git_context
+        or (index is not None and index.source_dirty)
+    )
 
     # Preserve embedding parity: if the existing index has embeddings, embed new sections too.
     if index is not None and index._has_embeddings():

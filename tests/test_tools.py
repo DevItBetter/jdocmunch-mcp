@@ -1,5 +1,6 @@
 """Tests for tool functions."""
 
+import shutil
 import subprocess
 
 import pytest
@@ -254,6 +255,163 @@ class TestIndexLocal:
         )
 
         assert updated["success"] is True
+        assert updated["source_dirty"] is True
+        assert "repo_at_sha" not in updated
+
+        repos = list_repos(storage_path=str(store_dir))
+        row = next(r for r in repos["repos"] if r["repo"] == "local/repo")
+        assert row["source_dirty"] is True
+        assert "repo_at_sha" not in row
+
+    def test_index_file_marks_dirty_when_sibling_doc_has_uncommitted_change(self, tmp_path):
+        repo_dir = tmp_path / "repo"
+        store_dir = tmp_path / "store"
+        repo_dir.mkdir()
+        readme = repo_dir / "README.md"
+        guide = repo_dir / "GUIDE.md"
+        readme.write_text("# Readme\n\nClean", encoding="utf-8")
+        guide.write_text("# Guide\n\nClean", encoding="utf-8")
+        _git(repo_dir, "init")
+        _git(repo_dir, "add", ".")
+        _git(repo_dir, "-c", "user.name=Test", "-c", "user.email=t@example.com", "commit", "-m", "docs")
+
+        indexed = index_local(
+            path=str(repo_dir),
+            use_ai_summaries=False,
+            use_embeddings=False,
+            storage_path=str(store_dir),
+        )
+        assert "repo_at_sha" in indexed
+
+        guide.write_text("# Guide\n\nDirty", encoding="utf-8")
+        updated = index_file(
+            file_path=str(readme),
+            use_ai_summaries=False,
+            storage_path=str(store_dir),
+        )
+
+        assert updated["success"] is True
+        assert updated["source_dirty"] is True
+        assert "repo_at_sha" not in updated
+
+        repos = list_repos(storage_path=str(store_dir))
+        row = next(r for r in repos["repos"] if r["repo"] == "local/repo")
+        assert row["source_dirty"] is True
+        assert "repo_at_sha" not in row
+
+    def test_index_file_marks_dirty_when_head_moves_for_sibling_doc(self, tmp_path):
+        repo_dir = tmp_path / "repo"
+        store_dir = tmp_path / "store"
+        repo_dir.mkdir()
+        readme = repo_dir / "README.md"
+        guide = repo_dir / "GUIDE.md"
+        readme.write_text("# Readme\n\nClean", encoding="utf-8")
+        guide.write_text("# Guide\n\nVersion one", encoding="utf-8")
+        _git(repo_dir, "init")
+        _git(repo_dir, "add", ".")
+        _git(repo_dir, "-c", "user.name=Test", "-c", "user.email=t@example.com", "commit", "-m", "v1")
+
+        indexed = index_local(
+            path=str(repo_dir),
+            use_ai_summaries=False,
+            use_embeddings=False,
+            storage_path=str(store_dir),
+        )
+        assert "repo_at_sha" in indexed
+
+        guide.write_text("# Guide\n\nVersion two", encoding="utf-8")
+        _git(repo_dir, "add", "GUIDE.md")
+        _git(repo_dir, "-c", "user.name=Test", "-c", "user.email=t@example.com", "commit", "-m", "v2")
+        new_sha = _git(repo_dir, "rev-parse", "HEAD")
+        updated = index_file(
+            file_path=str(readme),
+            use_ai_summaries=False,
+            storage_path=str(store_dir),
+        )
+
+        assert updated["success"] is True
+        assert updated["head_sha"] == new_sha
+        assert updated["source_dirty"] is True
+        assert "repo_at_sha" not in updated
+
+        repos = list_repos(storage_path=str(store_dir))
+        row = next(r for r in repos["repos"] if r["repo"] == "local/repo")
+        assert row["head_sha"] == new_sha
+        assert row["source_dirty"] is True
+        assert "repo_at_sha" not in row
+
+    def test_index_file_preserves_existing_dirty_state_after_worktree_clean(self, tmp_path):
+        repo_dir = tmp_path / "repo"
+        store_dir = tmp_path / "store"
+        repo_dir.mkdir()
+        readme = repo_dir / "README.md"
+        guide = repo_dir / "GUIDE.md"
+        readme.write_text("# Readme\n\nClean", encoding="utf-8")
+        guide.write_text("# Guide\n\nClean", encoding="utf-8")
+        _git(repo_dir, "init")
+        _git(repo_dir, "add", ".")
+        _git(repo_dir, "-c", "user.name=Test", "-c", "user.email=t@example.com", "commit", "-m", "docs")
+
+        indexed = index_local(
+            path=str(repo_dir),
+            use_ai_summaries=False,
+            use_embeddings=False,
+            storage_path=str(store_dir),
+        )
+        assert "repo_at_sha" in indexed
+
+        guide.write_text("# Guide\n\nDirty", encoding="utf-8")
+        dirty_update = index_file(
+            file_path=str(guide),
+            use_ai_summaries=False,
+            storage_path=str(store_dir),
+        )
+        assert dirty_update["source_dirty"] is True
+        _git(repo_dir, "checkout", "--", "GUIDE.md")
+
+        clean_file_update = index_file(
+            file_path=str(readme),
+            use_ai_summaries=False,
+            storage_path=str(store_dir),
+        )
+
+        assert clean_file_update["success"] is True
+        assert clean_file_update["source_dirty"] is True
+        assert "repo_at_sha" not in clean_file_update
+
+        repos = list_repos(storage_path=str(store_dir))
+        row = next(r for r in repos["repos"] if r["repo"] == "local/repo")
+        assert row["source_dirty"] is True
+        assert "repo_at_sha" not in row
+
+    def test_index_file_marks_dirty_when_git_context_disappears(self, tmp_path):
+        repo_dir = tmp_path / "repo"
+        store_dir = tmp_path / "store"
+        repo_dir.mkdir()
+        readme = repo_dir / "README.md"
+        readme.write_text("# Clean\n\nBody", encoding="utf-8")
+        _git(repo_dir, "init")
+        _git(repo_dir, "add", "README.md")
+        _git(repo_dir, "-c", "user.name=Test", "-c", "user.email=t@example.com", "commit", "-m", "docs")
+
+        indexed = index_local(
+            path=str(repo_dir),
+            use_ai_summaries=False,
+            use_embeddings=False,
+            storage_path=str(store_dir),
+        )
+        assert "repo_at_sha" in indexed
+
+        shutil.rmtree(repo_dir / ".git")
+        readme.write_text("# Changed\n\nOutside Git", encoding="utf-8")
+        updated = index_file(
+            file_path=str(readme),
+            use_ai_summaries=False,
+            storage_path=str(store_dir),
+        )
+
+        assert updated["success"] is True
+        assert updated["head_sha"] == indexed["head_sha"]
         assert updated["source_dirty"] is True
         assert "repo_at_sha" not in updated
 
