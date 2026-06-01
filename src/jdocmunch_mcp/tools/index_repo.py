@@ -197,15 +197,13 @@ async def index_repo(
             existing = store.load_index(owner, repo)
             if existing and existing.head_sha:
                 current_sha = await fetch_head_commit_sha(owner, repo, github_token)
-                if current_sha and current_sha == normalize_commit_sha(existing.head_sha):
+                if (
+                    current_sha
+                    and current_sha == normalize_commit_sha(existing.head_sha)
+                    and existing.sha_certified
+                    and not existing.source_dirty
+                ):
                     updated = existing
-                    if existing.source_dirty:
-                        updated = store.incremental_save(
-                            owner=owner, name=repo,
-                            changed_files=[], new_files=[], deleted_files=[],
-                            new_sections=[], raw_files={}, doc_types={},
-                            head_sha=current_sha, source_dirty=False,
-                        ) or existing
                     latency_ms = int((time.perf_counter() - t0) * 1000)
                     result = {
                         "success": True,
@@ -214,6 +212,7 @@ async def index_repo(
                         "incremental": True,
                         "head_sha": current_sha,
                         "source_dirty": False,
+                        "sha_certified": True,
                         "changed": 0, "new": 0, "deleted": 0,
                         "_meta": {"latency_ms": latency_ms},
                     }
@@ -225,6 +224,7 @@ async def index_repo(
             # Fetch HEAD SHA alongside tree (reuse connection)
             head_sha = await fetch_head_commit_sha(owner, repo, github_token, client=client)
             tree_ref = head_sha or "HEAD"
+            sha_certified = bool(head_sha)
 
             try:
                 tree_entries = await fetch_repo_tree(owner, repo, github_token, client=client, ref=tree_ref)
@@ -284,12 +284,13 @@ async def index_repo(
                 if existing and (
                     normalize_commit_sha(existing.head_sha) != head_sha
                     or existing.source_dirty
+                    or bool(existing.sha_certified) != sha_certified
                 ):
                     updated = store.incremental_save(
                         owner=owner, name=repo,
                         changed_files=[], new_files=[], deleted_files=[],
                         new_sections=[], raw_files={}, doc_types={},
-                        head_sha=head_sha, source_dirty=False,
+                        head_sha=head_sha, source_dirty=False, sha_certified=sha_certified,
                     ) or existing
                 latency_ms = int((time.perf_counter() - t0) * 1000)
                 result = {
@@ -298,6 +299,7 @@ async def index_repo(
                     "repo": f"{owner}/{repo}",
                     "incremental": True,
                     "source_dirty": False,
+                    "sha_certified": sha_certified,
                     "changed": 0, "new": 0, "deleted": 0,
                     "_meta": {"latency_ms": latency_ms},
                 }
@@ -332,7 +334,7 @@ async def index_repo(
                 owner=owner, name=repo,
                 changed_files=changed, new_files=new, deleted_files=deleted,
                 new_sections=new_sections, raw_files=raw_subset, doc_types=doc_types,
-                head_sha=head_sha, source_dirty=False,
+                head_sha=head_sha, source_dirty=False, sha_certified=sha_certified,
             )
 
             latency_ms = int((time.perf_counter() - t0) * 1000)
@@ -345,6 +347,7 @@ async def index_repo(
                 "indexed_at": updated.indexed_at if updated else "",
                 "semantic_search": use_embeddings and get_provider_name() is not None,
                 "source_dirty": False,
+                "sha_certified": sha_certified,
                 "_meta": {"latency_ms": latency_ms},
             }
             if warnings:
@@ -387,6 +390,7 @@ async def index_repo(
             raw_files=raw_files,
             doc_types=doc_types,
             head_sha=head_sha,
+            sha_certified=sha_certified,
         )
 
         latency_ms = int((time.perf_counter() - t0) * 1000)
@@ -400,6 +404,7 @@ async def index_repo(
             "files": parsed_files[:20],
             "semantic_search": use_embeddings and get_provider_name() is not None,
             "source_dirty": False,
+            "sha_certified": sha_certified,
             "_meta": {"latency_ms": latency_ms},
         }
         if saved.head_sha:
