@@ -55,10 +55,15 @@ def normalize_commit_sha(value: Optional[str]) -> Optional[str]:
     return value.lower()
 
 
-def format_repo_at_sha(repo: str, head_sha: Optional[str], source_dirty: bool = False) -> Optional[str]:
+def format_repo_at_sha(
+    repo: str,
+    head_sha: Optional[str],
+    source_dirty: bool = False,
+    sha_certified: bool = False,
+) -> Optional[str]:
     """Return the immutable repo@sha handle when this index is commit-clean."""
     sha = normalize_commit_sha(head_sha)
-    if not sha or source_dirty:
+    if not sha or source_dirty or not sha_certified:
         return None
     return f"{repo}@{sha}"
 
@@ -85,6 +90,7 @@ class DocIndex:
     file_hashes: dict = field(default_factory=dict)
     head_sha: Optional[str] = None
     source_dirty: bool = False
+    sha_certified: bool = False
     # v1.12.0: BM25 corpus stats. Empty dict for legacy indices — score_section
     # gracefully degrades when stats are missing.
     bm25_stats: dict = field(default_factory=dict)
@@ -107,7 +113,12 @@ class DocIndex:
 
     @property
     def repo_at_sha(self) -> Optional[str]:
-        return format_repo_at_sha(self.repo, self.head_sha, self.source_dirty)
+        return format_repo_at_sha(
+            self.repo,
+            self.head_sha,
+            self.source_dirty,
+            self.sha_certified,
+        )
 
     def _ensure_content(self, sec: dict) -> str:
         """Return section content, loading from disk lazily if missing.
@@ -419,6 +430,7 @@ class DocStore:
         file_hashes: Optional[dict] = None,
         head_sha: Optional[str] = None,
         source_dirty: bool = False,
+        sha_certified: bool = False,
         source_root: str = "",
     ) -> "DocIndex":
         """Save index and raw files to storage atomically."""
@@ -444,6 +456,7 @@ class DocStore:
             file_hashes=file_hashes,
             head_sha=head_sha,
             source_dirty=source_dirty,
+            sha_certified=sha_certified,
             bm25_stats=bm25_stats,
             source_root=source_root or "",
         )
@@ -505,6 +518,7 @@ class DocStore:
             file_hashes=data.get("file_hashes", {}),
             head_sha=data.get("head_sha"),
             source_dirty=bool(data.get("source_dirty", False)),
+            sha_certified=bool(data.get("sha_certified", False)),
             bm25_stats=data.get("bm25_stats", {}),
             source_root=data.get("source_root", ""),
         )
@@ -572,6 +586,7 @@ class DocStore:
         doc_types: dict,
         head_sha=_UNSET,
         source_dirty=_UNSET,
+        sha_certified=_UNSET,
         source_root=_UNSET,
     ) -> Optional["DocIndex"]:
         """Incrementally update an existing index.
@@ -658,6 +673,7 @@ class DocStore:
             file_hashes=file_hashes,
             head_sha=index.head_sha if head_sha is _UNSET else head_sha,
             source_dirty=index.source_dirty if source_dirty is _UNSET else bool(source_dirty),
+            sha_certified=index.sha_certified if sha_certified is _UNSET else bool(sha_certified),
             bm25_stats=bm25_stats,
             source_root=index.source_root if source_root is _UNSET else (source_root or ""),
         )
@@ -736,10 +752,12 @@ class DocStore:
                 }
                 sha = normalize_commit_sha(data.get("head_sha"))
                 source_dirty = bool(data.get("source_dirty", False))
+                sha_certified = bool(data.get("sha_certified", False))
                 if sha:
                     row["head_sha"] = sha
                 row["source_dirty"] = source_dirty
-                repo_at_sha = format_repo_at_sha(data["repo"], sha, source_dirty)
+                row["sha_certified"] = sha_certified
+                repo_at_sha = format_repo_at_sha(data["repo"], sha, source_dirty, sha_certified)
                 if repo_at_sha:
                     row["repo_at_sha"] = repo_at_sha
                 if data.get("source_root"):
@@ -783,6 +801,8 @@ class DocStore:
             d["head_sha"] = index.head_sha
         if index.source_dirty:
             d["source_dirty"] = True
+        if index.sha_certified:
+            d["sha_certified"] = True
         if index.bm25_stats:
             d["bm25_stats"] = index.bm25_stats
         if getattr(index, "source_root", ""):
@@ -829,7 +849,7 @@ class DocStore:
 
         index = self.load_index(owner, name)
         indexed_sha = normalize_commit_sha(index.head_sha if index else None)
-        if index and indexed_sha == wanted_sha and not index.source_dirty:
+        if index and indexed_sha == wanted_sha and not index.source_dirty and index.sha_certified:
             return owner, name
 
         # Preserve the old tuple-only contract. The invalid name is intentionally

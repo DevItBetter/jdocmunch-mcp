@@ -343,6 +343,7 @@ def search_sections(
     if index.head_sha:
         meta["head_sha"] = index.head_sha
     meta["source_dirty"] = bool(index.source_dirty)
+    meta["sha_certified"] = bool(index.sha_certified)
     if role:
         meta["role_filter"] = role.strip().lower()
     if profile_norm:

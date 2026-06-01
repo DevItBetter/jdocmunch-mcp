@@ -118,6 +118,7 @@ def get_doc_health(
     if index.head_sha:
         payload["head_sha"] = index.head_sha
     payload["source_dirty"] = bool(index.source_dirty)
+    payload["sha_certified"] = bool(index.sha_certified)
     if index.repo_at_sha:
         payload["repo_at_sha"] = index.repo_at_sha
     return payload
