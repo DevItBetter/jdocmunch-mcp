@@ -1,6 +1,41 @@
 # jdocmunch-mcp
 
-**Version:** 1.66.3 | **Tests:** `pytest tests/ -q` (1254 passed)
+**Version:** 1.67.0 | **Tests:** `pytest tests/ -q` (1277 passed)
+
+## v1.67.0 - certified repo@sha handles for citeable doc snapshots (PR #23, closes #22)
+Contributed by @DevItBetter; follow-up to #17. Adds an immutable
+`owner/repo@40hexsha` handle so downstream workflows can cite the exact
+doc snapshot used for retrieval. New `DocIndex` fields `head_sha`,
+`source_dirty`, `sha_certified`, `source_root`; derived `repo_at_sha`
+property (never stored, emitted only when SHA is 40-hex AND not dirty
+AND certified). Surfaced in `list_repos`, `search_sections`,
+`get_doc_health`, `get_index_overview`, `doc_health_radar`, session
+snapshot. `search_sections` (and every read tool) accepts a strict
+`repo@sha` alias that resolves only when the stored index matches that
+commit and is certified clean; a miss resolves to an uncreatable
+sentinel name so it cannot collide with a real repo.
+
+Certification rules (conservative by design):
+- GitHub: `index_repo` resolves HEAD->SHA once, then fetches tree,
+  `.gitignore`, and all content pinned at that SHA (`?ref=<sha>`),
+  closing the old per-call HEAD drift window. Certified only when the
+  SHA actually resolved.
+- Local Git: "clean" means the *indexed corpus* is reproducible at
+  HEAD, not that the worktree is pristine. Dirty files outside the
+  indexed scope don't block; gitignored-but-explicitly-indexed paths
+  do (separate `git ls-files` tracked-ness check). New `tools/_git.py`
+  helpers; git probes bounded by `JDOCMUNCH_GIT_TIMEOUT` (default 10s,
+  `<=0` disables); a timed-out/failed probe falls to dirty so an
+  immutable handle is never emitted for an unknown state.
+- `index_file` is sticky: surgical updates never upgrade a dirty,
+  moved-HEAD, untracked-path, or no-longer-Git-backed index to
+  certified. Run `index_local` to recertify the full corpus.
+
+Fully additive: `INDEX_VERSION` stays 3 (new fields use `.get` defaults
+on load + omit-when-empty on write, so old<->new indexes round-trip).
+`load_index`/`delete_index` now catch `ValueError` from the sentinel
+name. Suite-parity follow-up candidate for jcm/jdata if citeable
+handles earn their keep.
 
 ## v1.66.3 - openai-compatible: probe actual dim at init (jdoc#20)
 Hardens v1.66.0's openai-compatible provider. Backing-model swap
