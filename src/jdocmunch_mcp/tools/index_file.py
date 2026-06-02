@@ -7,21 +7,23 @@ from typing import Optional
 
 from ..parser import parse_file, preprocess_content, ALL_EXTENSIONS
 from ..storage import DocStore
+from ..storage.doc_store import normalize_commit_sha
 from ..summarizer import summarize_sections
 from ..embeddings import embed_sections
+from ._git import local_git_head, local_git_paths_dirty, local_git_paths_tracked
 
 
 def _find_owning_index(
     file_path: Path,
     store: DocStore,
-) -> Optional[tuple[str, str, str]]:
+) -> Optional[tuple[str, str, str, Path]]:
     """Find which index owns a given file path.
 
     Walks up the directory tree from the file, checking each ancestor
     folder name against existing local indexes.  When a match is found,
     verifies that the relative path exists in the index's doc_paths.
 
-    Returns (owner, name, rel_path) or None.
+    Returns (owner, name, rel_path, source_root) or None.
     """
     file_path = file_path.resolve()
     parts = file_path.parts
@@ -51,12 +53,12 @@ def _find_owning_index(
             continue
 
         if rel_path in index.doc_paths or rel_path in index.file_hashes:
-            return ("local", folder_name, rel_path)
+            return ("local", folder_name, rel_path, candidate_root)
 
         # The file might be new (not yet in doc_paths) but under this root
         # Accept if the root contains other indexed files
         if index.doc_paths:
-            return ("local", folder_name, rel_path)
+            return ("local", folder_name, rel_path, candidate_root)
 
     return None
 
@@ -91,7 +93,7 @@ def index_file(
     if match is None:
         return {"success": False, "error": f"File not in any index: {file_path}", "exit_code": 1}
 
-    owner, name, rel_path = match
+    owner, name, rel_path, detected_root = match
     repo_id = f"{owner}/{name}"
 
     # Read and parse the file
@@ -114,6 +116,37 @@ def index_file(
     # Determine if this is a new or changed file
     index = store.load_index(owner, name)
     is_new = rel_path not in (index.file_hashes if index else {})
+    source_root = detected_root
+    if index is not None and getattr(index, "source_root", ""):
+        candidate = Path(index.source_root).expanduser()
+        if candidate.exists():
+            source_root = candidate.resolve()
+    previous_sha = normalize_commit_sha(index.head_sha if index else None)
+    previous_certified = bool(index is not None and index.sha_certified)
+    indexed_paths = set(index.doc_paths if index else [])
+    indexed_paths.add(rel_path)
+    paths_tracked = local_git_paths_tracked(source_root, indexed_paths)
+    paths_dirty = local_git_paths_dirty(source_root, indexed_paths)
+    current_sha = local_git_head(source_root)
+    head_moved = bool(previous_sha and current_sha and previous_sha != current_sha)
+    legacy_uncertified = bool(current_sha and not previous_sha)
+    lost_git_context = bool(previous_sha and current_sha is None)
+    head_sha = current_sha or previous_sha
+    source_dirty = bool(
+        paths_dirty
+        or head_moved
+        or legacy_uncertified
+        or lost_git_context
+        or (bool(head_sha) and not paths_tracked)
+        or (index is not None and index.source_dirty)
+    )
+    sha_certified = bool(
+        previous_certified
+        and current_sha
+        and previous_sha == current_sha
+        and not source_dirty
+        and paths_tracked
+    )
 
     # Preserve embedding parity: if the existing index has embeddings, embed new sections too.
     if index is not None and index._has_embeddings():
@@ -129,10 +162,14 @@ def index_file(
         new_sections=new_sections,
         raw_files={rel_path: content},
         doc_types={ext: 1},
+        head_sha=head_sha,
+        source_dirty=source_dirty,
+        sha_certified=sha_certified,
+        source_root=str(source_root),
     )
 
     latency_ms = int((time.perf_counter() - t0) * 1000)
-    return {
+    result = {
         "success": True,
         "repo": repo_id,
         "file": rel_path,
@@ -142,6 +179,14 @@ def index_file(
         "exit_code": 0,
         "_meta": {"latency_ms": latency_ms},
     }
+    if updated and updated.head_sha:
+        result["head_sha"] = updated.head_sha
+    if updated:
+        result["source_dirty"] = bool(updated.source_dirty)
+        result["sha_certified"] = bool(updated.sha_certified)
+    if updated and updated.repo_at_sha:
+        result["repo_at_sha"] = updated.repo_at_sha
+    return result
 
 
 def index_file_cli(file_path: str) -> dict:

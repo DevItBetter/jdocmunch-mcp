@@ -18,8 +18,10 @@ from ..security import (
     DEFAULT_MAX_FILE_SIZE,
 )
 from ..storage import DocStore
+from ..storage.doc_store import normalize_commit_sha
 from ..summarizer import summarize_sections
 from ..embeddings import embed_sections, get_provider_name, should_embed
+from ._git import local_git_head, local_git_paths_dirty, local_git_paths_tracked, stable_local_git_state
 from ._constants import SKIP_PATTERNS
 
 
@@ -32,6 +34,17 @@ def _load_gitignore(folder_path: Path) -> Optional[pathspec.PathSpec]:
         except Exception:
             pass
     return None
+
+
+def _add_commit_fields(result: dict, index) -> None:
+    if not index:
+        return
+    if index.head_sha:
+        result["head_sha"] = index.head_sha
+    result["source_dirty"] = bool(index.source_dirty)
+    result["sha_certified"] = bool(index.sha_certified)
+    if index.repo_at_sha:
+        result["repo_at_sha"] = index.repo_at_sha
 
 
 def _should_skip(rel_path: str) -> bool:
@@ -331,7 +344,9 @@ def index_local(
         repo_name = name if name else folder_path.name
         owner = "local"
         repo_id = f"{owner}/{repo_name}"
+        initial_git_state = (local_git_head(folder_path), False)
         store = DocStore(base_path=storage_path)
+        existing_index = store.load_index(owner, repo_name)
 
         # Read all discovered files
         current_files: dict = {}
@@ -349,11 +364,39 @@ def index_local(
             except Exception as e:
                 warnings.append(f"Failed to read {file_path}: {e}")
 
+        final_git_state = (local_git_head(folder_path), False)
+        head_sha, source_dirty = stable_local_git_state(initial_git_state, final_git_state)
+        cert_paths = set(current_files.keys())
+        if existing_index is not None:
+            cert_paths.update(existing_index.doc_paths)
+        if local_git_paths_dirty(folder_path, cert_paths):
+            source_dirty = True
+        paths_tracked = local_git_paths_tracked(folder_path, current_files.keys())
+        if head_sha and not paths_tracked:
+            source_dirty = True
+        sha_certified = bool(head_sha and not source_dirty and paths_tracked)
+
         # --- Incremental path ---
-        if incremental and store.load_index(owner, repo_name) is not None:
+        if incremental and existing_index is not None:
             changed, new, deleted = store.detect_changes(owner, repo_name, current_files)
 
             if not changed and not new and not deleted:
+                updated = existing_index
+                if (
+                    normalize_commit_sha(existing_index.head_sha) != head_sha
+                    or bool(existing_index.source_dirty) != bool(source_dirty)
+                    or bool(existing_index.sha_certified) != bool(sha_certified)
+                    or getattr(existing_index, "source_root", "") != str(folder_path)
+                ):
+                    updated = store.incremental_save(
+                        owner=owner, name=repo_name,
+                        changed_files=[], new_files=[], deleted_files=[],
+                        new_sections=[], raw_files={}, doc_types={},
+                        head_sha=head_sha,
+                        source_dirty=source_dirty,
+                        sha_certified=sha_certified,
+                        source_root=str(folder_path),
+                    ) or existing_index
                 latency_ms = int((time.perf_counter() - t0) * 1000)
                 nochange_result: dict = {
                     "success": True,
@@ -364,6 +407,7 @@ def index_local(
                     "changed": 0, "new": 0, "deleted": 0,
                     "_meta": {"latency_ms": latency_ms},
                 }
+                _add_commit_fields(nochange_result, updated)
                 # jdoc#15: report truncation even when nothing changed,
                 # since the visible-corpus boundary is unchanged.
                 if discovered_count > max_files:
@@ -403,6 +447,10 @@ def index_local(
                 owner=owner, name=repo_name,
                 changed_files=changed, new_files=new, deleted_files=deleted,
                 new_sections=new_sections, raw_files=raw_subset, doc_types=doc_types,
+                head_sha=head_sha,
+                source_dirty=source_dirty,
+                sha_certified=sha_certified,
+                source_root=str(folder_path),
             )
 
             latency_ms = int((time.perf_counter() - t0) * 1000)
@@ -417,6 +465,7 @@ def index_local(
                 "semantic_search": use_embeddings and get_provider_name() is not None,
                 "_meta": {"latency_ms": latency_ms},
             }
+            _add_commit_fields(result, updated)
             # jdoc#15: surface truncation on the incremental path too.
             if discovered_count > max_files:
                 result["truncated"] = True
@@ -511,6 +560,9 @@ def index_local(
             sections=all_sections,
             raw_files=raw_files,
             doc_types=doc_types,
+            head_sha=head_sha,
+            source_dirty=source_dirty,
+            sha_certified=sha_certified,
             source_root=str(folder_path),
         )
 
@@ -527,6 +579,7 @@ def index_local(
             "semantic_search": use_embeddings and get_provider_name() is not None,
             "_meta": {"latency_ms": latency_ms},
         }
+        _add_commit_fields(result, saved)
         if autotune_result is not None:
             result["autotune"] = autotune_result
 
