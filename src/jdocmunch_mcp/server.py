@@ -273,6 +273,10 @@ def _all_tools() -> list[Tool]:
                         "type": "string",
                         "description": "GitHub repository URL or owner/repo string"
                     },
+                    "ref": {
+                        "type": "string",
+                        "description": "Optional GitHub branch, tag, or commit-ish to index. If omitted, HEAD is used. The ref is resolved to a commit SHA before fetching content; repo@sha remains the durable lookup handle."
+                    },
                     "use_ai_summaries": {
                         "type": "boolean",
                         "description": "Use AI to generate section summaries.",
@@ -1685,6 +1689,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 storage_path=storage_path,
                 incremental=arguments.get("incremental", True),
                 name=arguments.get("name"),
+                ref=arguments.get("ref"),
             )
         elif name in ("doc_list_repos", "list_repos"):  # list_repos kept for backward compat
             result = list_repos(storage_path=storage_path)

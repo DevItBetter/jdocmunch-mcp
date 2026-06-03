@@ -40,6 +40,7 @@ Walks the local directory with full security controls: path traversal prevention
 ```json
 {
   "url": "owner/repo",
+  "ref": "optional-branch-tag-or-commit",
   "name": "optional-safe-storage-name",
   "use_ai_summaries": true,
   "incremental": true
@@ -48,9 +49,11 @@ Walks the local directory with full security controls: path traversal prevention
 
 Fetches documentation files via the GitHub API, parses sections, and saves to local storage.
 
+`ref` (optional): selects the GitHub branch, tag, or commit-ish to index. If omitted, `HEAD` is used. Explicit refs are resolved to a 40-hex commit SHA before fetching tree/content; unresolved explicit refs return an error instead of falling back to `HEAD`. Durable handles stay commit-SHA based via `repo_at_sha`.
+
 `name` (optional): stores the index under `owner/name` instead of `owner/repo`. This is a storage-name override, not a moving alias. The value must be a single safe storage component using only letters, numbers, dot, underscore, and hyphen; `/`, `\`, and `@` are rejected. GitHub indexing responses include the upstream source identity as `source_repo`, and certified indexes include both `repo_at_sha` for the stored index and `source_repo_at_sha` for the upstream GitHub repository.
 
-`incremental` (default `true`): first checks the HEAD commit SHA — if it matches the stored SHA the call returns immediately without any file fetches. If the SHA differs, only changed files are re-parsed. Set to `false` to force a full re-index.
+`incremental` (default `true`): first checks the selected GitHub ref's commit SHA — if it matches the stored SHA the call returns immediately without any file fetches. If the SHA differs, only changed files are re-parsed. Set to `false` to force a full re-index.
 
 #### `delete_index` — Delete index for a repository
 

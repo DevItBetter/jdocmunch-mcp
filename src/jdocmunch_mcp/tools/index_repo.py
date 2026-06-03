@@ -4,7 +4,7 @@ import asyncio
 import os
 import time
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import httpx
 
@@ -31,6 +31,19 @@ def parse_github_url(url: str) -> tuple:
     raise ValueError(f"Could not parse GitHub URL: {url}")
 
 
+def _normalize_requested_ref(ref: Optional[str]) -> tuple[str, bool, Optional[str]]:
+    """Return (ref_to_resolve, was_explicit, error)."""
+    if ref is None:
+        return "HEAD", False, None
+    if not isinstance(ref, str):
+        return "", True, f"Invalid ref: {ref!r}"
+    original = ref
+    ref = ref.strip()
+    if not ref:
+        return "", True, f"Invalid ref: {original!r}"
+    return ref, True, None
+
+
 def _should_skip(path: str) -> bool:
     normalized = "/" + path.replace("\\", "/")
     for pat in SKIP_PATTERNS:
@@ -47,7 +60,8 @@ async def fetch_head_commit_sha(
     ref: str = "HEAD",
 ) -> Optional[str]:
     """Fetch a commit SHA cheaply (single lightweight request)."""
-    url = f"https://api.github.com/repos/{owner}/{repo}/commits/{ref}"
+    ref_path = quote(ref, safe="")
+    url = f"https://api.github.com/repos/{owner}/{repo}/commits/{ref_path}"
     headers = {"Accept": "application/vnd.github.v3+json"}
     if token:
         headers["Authorization"] = f"token {token}"
@@ -176,6 +190,7 @@ async def index_repo(
     storage_path: Optional[str] = None,
     incremental: bool = True,
     name: Optional[str] = None,
+    ref: Optional[str] = None,
 ) -> dict:
     """Index a GitHub repository's documentation.
 
@@ -191,6 +206,7 @@ async def index_repo(
         storage_path: Custom storage path.
         incremental: When True and an existing index exists, only re-index changed files.
         name: Optional stored index name override. Defaults to the source repo name.
+        ref: Optional GitHub branch, tag, or commit-ish to index. Defaults to HEAD.
 
     Returns:
         Dict with indexing results.
@@ -205,6 +221,10 @@ async def index_repo(
 
     if not github_token:
         github_token = os.environ.get("GITHUB_TOKEN")
+
+    requested_ref, explicit_ref, ref_error = _normalize_requested_ref(ref)
+    if ref_error:
+        return {"success": False, "error": ref_error}
 
     warnings = []
 
@@ -225,7 +245,7 @@ async def index_repo(
             existing = store.load_index(owner, index_name)
             if existing and existing.head_sha:
                 existing_source_repo = existing.source_repo or existing.repo
-                current_sha = await fetch_head_commit_sha(owner, source_repo, github_token)
+                current_sha = await fetch_head_commit_sha(owner, source_repo, github_token, ref=requested_ref)
                 if (
                     current_sha
                     and current_sha == normalize_commit_sha(existing.head_sha)
@@ -265,8 +285,16 @@ async def index_repo(
                     )
 
         async with httpx.AsyncClient(timeout=30.0) as client:
-            # Fetch HEAD SHA alongside tree (reuse connection)
-            head_sha = await fetch_head_commit_sha(owner, source_repo, github_token, client=client)
+            # Resolve the requested ref once, then fetch all content at that SHA.
+            head_sha = await fetch_head_commit_sha(
+                owner,
+                source_repo,
+                github_token,
+                client=client,
+                ref=requested_ref,
+            )
+            if explicit_ref and not head_sha:
+                return {"success": False, "error": f"GitHub ref not found: {owner}/{source_repo}@{requested_ref}"}
             tree_ref = head_sha or "HEAD"
             sha_certified = bool(head_sha)
 
