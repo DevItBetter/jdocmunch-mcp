@@ -1,6 +1,29 @@
 # jdocmunch-mcp
 
-**Version:** 1.67.0 | **Tests:** `pytest tests/ -q` (1277 passed)
+**Version:** 1.68.0 | **Tests:** `pytest tests/ -q` (1293 passed)
+
+## v1.68.0 - `doc_index_repo` name override for named GitHub doc indexes (PR #25, closes #24)
+Contributed by @DevItBetter; follow-up to #17 and #23. Adds an optional
+`name` arg to `doc_index_repo`/`index_repo` so a GitHub doc index can be
+stored under a caller-chosen safe handle (`owner/name`) while preserving
+the upstream GitHub identity. Without `name`, behavior is unchanged. With
+it, the stored index is `owner/name`, the upstream source is persisted on
+a new `DocIndex.source_repo` field, and indexing responses + `list_repos`
+surface `source_repo` (and `source_repo_at_sha` for certified indexes)
+alongside the stored `repo` / `repo_at_sha`.
+
+`name` is a storage-name override, not a moving alias: it must be a single
+safe component (`[A-Za-z0-9._-]+`; `/`, `\`, `@`, `.`, `..`, empty, and
+non-strings rejected before any network fetch). The SHA fast-path and
+incremental paths stay keyed to the stored name while fetching from the
+upstream source, and both now guard on `existing_source_repo ==
+source_repo_id` so reusing one stored name for a different upstream source
+can't serve stale content via the fast path. Legacy indexes (empty
+`source_repo`) fall back to `repo` and get backfilled on next touch.
+
+Fully additive: `INDEX_VERSION` stays 3 (new field uses `.get` default on
+load + omit-when-empty on write). Out of scope (deliberately): branch/tag/
+ref selection, moving aliases, multi-alias, snapshot retention.
 
 ## v1.67.0 - certified repo@sha handles for citeable doc snapshots (PR #23, closes #22)
 Contributed by @DevItBetter; follow-up to #17. Adds an immutable
