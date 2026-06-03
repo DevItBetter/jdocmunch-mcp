@@ -292,7 +292,7 @@ def _all_tools() -> list[Tool]:
                     },
                     "incremental": {
                         "type": "boolean",
-                        "description": "When true (default), skip all HTTP fetches if the HEAD commit SHA is unchanged; otherwise only re-index changed files. Set to false to force a full re-index.",
+                        "description": "When true (default), skip all HTTP fetches if the selected GitHub ref's commit SHA is unchanged; otherwise only re-index changed files. Set to false to force a full re-index.",
                         "default": True
                     }
                 },

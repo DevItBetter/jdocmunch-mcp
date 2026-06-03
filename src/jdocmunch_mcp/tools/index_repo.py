@@ -263,9 +263,14 @@ async def index_repo(
                             source_repo=source_repo_id,
                         ) or existing
                     latency_ms = int((time.perf_counter() - t0) * 1000)
+                    message = (
+                        "No changes detected (resolved ref SHA unchanged)"
+                        if explicit_ref
+                        else "No changes detected (HEAD SHA unchanged)"
+                    )
                     result = {
                         "success": True,
-                        "message": "No changes detected (HEAD SHA unchanged)",
+                        "message": message,
                         "repo": repo_id,
                         "incremental": True,
                         "head_sha": current_sha,
@@ -294,7 +299,10 @@ async def index_repo(
                 ref=requested_ref,
             )
             if explicit_ref and not head_sha:
-                return {"success": False, "error": f"GitHub ref not found: {owner}/{source_repo}@{requested_ref}"}
+                return {
+                    "success": False,
+                    "error": f"GitHub ref could not be resolved: {owner}/{source_repo}@{requested_ref}",
+                }
             tree_ref = head_sha or "HEAD"
             sha_certified = bool(head_sha)
 

@@ -217,7 +217,7 @@ async def test_index_repo_explicit_unknown_ref_fails_without_head_fallback(tmp_p
         storage_path=str(tmp_path),
     )
 
-    assert result == {"success": False, "error": "GitHub ref not found: octo/docs@missing-tag"}
+    assert result == {"success": False, "error": "GitHub ref could not be resolved: octo/docs@missing-tag"}
 
 
 @pytest.mark.asyncio
@@ -527,7 +527,7 @@ async def test_index_repo_ref_fast_path_uses_requested_ref(tmp_path, monkeypatch
     )
 
     assert result["success"] is True
-    assert result["message"] == "No changes detected (HEAD SHA unchanged)"
+    assert result["message"] == "No changes detected (resolved ref SHA unchanged)"
     assert result["repo"] == "octo/docs_v1"
     assert result["repo_at_sha"] == f"octo/docs_v1@{sha}"
     assert result["source_repo_at_sha"] == f"octo/docs@{sha}"
